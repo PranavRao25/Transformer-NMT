@@ -1,0 +1,5 @@
+model/best_model.pt filter=lfs diff=lfs merge=lfs -text
+model/multi30k_bpe.json filter=lfs diff=lfs merge=lfs -text
+model/Transformer_noam_labelsmoothing>0_1.pt filter=lfs diff=lfs merge=lfs -text
+model/Transformer_noam_labelsmoothing>0.pt filter=lfs diff=lfs merge=lfs -text
+model/Transformer_noam_labelsmoothing0_sin.pt filter=lfs diff=lfs merge=lfs -text
