@@ -1,0 +1,72 @@
+name : "Transformer-NMT"
+author : "Pranav Rao"
+version : "v1"
+
+data:
+  original: "bentrevett/multi30k"
+  raw: "data/raw"
+  processed: "data/processed"
+  production: "data/production"
+  version: "v1"
+
+train:
+  device: "cuda"
+  name: "transformer"
+  path: "model/"
+  output: "output/"
+  version: "v1"
+  always_save_checkpoint: True
+  init_from: 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+  hyperparams:
+    lr: 3e-4
+    train_batch_size: 32
+    eval_batch_size: 16
+    epochs: 1
+    n_layers: 1  # 1 -> 22.7 M parameters (43 MB) ; 6 -> 59.5 M parameters
+    heads: 8
+    d_model: 512
+    max_grad_norm: 1.0
+    wgt_decay: 0.01
+    # grad_acc: 5 * 8 # used to simulate larger batch sizes
+    block_size: 1024
+    max_iters: 600000 # total number of training iterations
+    physical_batch_size: 8  # How many sequences fit in VRAM at once
+    grad_acc: 4   # 8 * 4 = Effective Batch Size of 32
+  optimizer:
+    name: "adamw"
+    beta1: 0.9
+    beta2: 0.95
+  grad_clip: 1.0
+  decay_lr: True
+  warmup_iters: 2000 # how many steps to warm up for
+  lr_decay_iters: 600000 # should be ~= max_iters per Chinchilla
+  min_lr: 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+  eval_interval: 2000
+  log_interval: 1
+  eval_iters: 200
+  eval_only: False # if True, script exits right after the first eval
+  compile: True
+  # dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16
+
+inference:
+  init_from: 'resume'
+  output: 'output'
+  start: '\n'
+  num_samples: 10
+  max_new_tokens: 500
+  temp: 0.8
+  top_k: 200
+  seed: 1337
+  compile: True
+
+arch:
+  layers: 12
+  heads: 12
+  embed_len: 768
+  dropout: 0.0
+  bias: False  # bias for Linear and LayerNorm
+
+wandb:
+  log: True
+  project: "nmt_trans"
+  run_name: "trans"
