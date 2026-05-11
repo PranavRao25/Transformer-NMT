@@ -1,4 +1,5 @@
 """
+UNSCALED ATTENTION
 train.py — Training Pipeline, Inference & Evaluation
 DA6401 Assignment 3: "Attention Is All You Need"
 
@@ -359,14 +360,14 @@ def run_training_experiment() -> None:
         "num_heads": 8,
         "d_ff": 2048,
         "dropout": 0.1,
-        "smoothing": 0,
+        "smoothing": 0.1,
         "warmup_steps": 4000,
         "learning_rate": 3e-4,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "resume_from": "None"
     }
     
-    model_name = f"Transformer_noam_labelsmoothing0_sin"
+    model_name = f"Transformer_noam_labelsmoothing>0_sin_unscaled"
 
     wandb.init(project="da6401-a3", config=config)
     device = str(config["device"])
@@ -374,7 +375,7 @@ def run_training_experiment() -> None:
     train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, src_vocab_size, tgt_vocab_size, pad_idx = load_data(config, device)
 
     model = Transformer(src_vocab_size, tgt_vocab_size, int(config["d_model"]), int(config["n_layers"]),
-                        int(config["num_heads"]), d_ff=int(config["d_ff"]), dropout=float(config["dropout"])).to(device)
+                        int(config["num_heads"]), d_ff=int(config["d_ff"]), dropout=float(config["dropout"]), unscaled=True).to(device)
 
     # model.decoder.output_projection.weight = model.target_embedding.embedding.weight
     optimizer = torch.optim.AdamW(

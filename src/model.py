@@ -62,6 +62,42 @@ def scaled_dot_product_attention(
     
     return output, attn_w
 
+def unscaled_dot_product_attention(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute Scaled Dot-Product Attention.
+
+        Attention(Q, K, V) = softmax( Q·Kᵀ / √dₖ ) · V
+
+    Args:
+        Q    : Query tensor,  shape (..., seq_q, d_k)
+        K    : Key tensor,    shape (..., seq_k, d_k)
+        V    : Value tensor,  shape (..., seq_k, d_v)
+        mask : Optional Boolean mask, shape broadcastable to
+               (..., seq_q, seq_k).
+               Positions where mask is True are MASKED OUT
+               (set to -inf before softmax).
+
+    Returns:
+        output : Attended output,   shape (..., seq_q, d_v)
+        attn_w : Attention weights, shape (..., seq_q, seq_k)
+    """
+    d_k = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1))
+    
+    if mask is not None:
+        min_value = torch.finfo(scores.dtype).min
+        scores = scores.masked_fill(mask, min_value)
+        
+    attn_w = F.softmax(scores, dim=-1)
+    output = torch.matmul(attn_w, V)
+    
+    return output, attn_w
+
 # ══════════════════════════════════════════════════════════════════════
 # ❷  MASK HELPERS 
 # ══════════════════════════════════════════════════════════════════════
@@ -129,7 +165,7 @@ class MultiHeadAttention(nn.Module):
         dropout   (float): Dropout probability applied to attention weights.
     """
 
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1, unscaled=False) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
@@ -141,7 +177,7 @@ class MultiHeadAttention(nn.Module):
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
         self.W_o = nn.Linear(d_model, d_model)
-        
+        self.unscaled = unscaled
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(
@@ -157,7 +193,11 @@ class MultiHeadAttention(nn.Module):
         K = self.W_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         V = self.W_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         
-        x, attn_w = scaled_dot_product_attention(Q, K, V, mask)
+        if self.unscaled:
+            x, attn_w = unscaled_dot_product_attention(Q, K, V, mask)
+        else:
+            x, attn_w = scaled_dot_product_attention(Q, K, V, mask)
+        
         x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         x = self.dropout(x)
         
@@ -167,29 +207,60 @@ class MultiHeadAttention(nn.Module):
 #   POSITIONAL ENCODING  
 # ══════════════════════════════════════════════════════════════════════
 
+# class PositionalEncoding(nn.Module):
+#     """
+#     Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
+
+#     Args:
+#         d_model  (int)  : Embedding dimensionality.
+#         dropout  (float): Dropout applied after adding encodings.
+#         max_len  (int)  : Maximum sequence length to pre-compute (default 5000).
+#     """
+
+#     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+#         super().__init__()
+#         self.dropout = nn.Dropout(p=dropout)
+        
+#         pe = torch.zeros(max_len, d_model)
+#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+#         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         pe = pe.unsqueeze(0) # Shape: (1, max_len, d_model)
+        
+#         self.register_buffer('pe', pe)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             x : Input embeddings, shape [batch, seq_len, d_model]
+
+#         Returns:
+#             Tensor of same shape [batch, seq_len, d_model]
+#             = x  +  PE[:, :seq_len, :]  
+
+#         """
+
+#         x = x + self.pe[:, :x.size(1), :] # type: ignore
+#         return self.dropout(x)
+
+
 class PositionalEncoding(nn.Module):
     """
-    Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
+    Learned Positional Encoding using torch.nn.Embedding.
 
     Args:
         d_model  (int)  : Embedding dimensionality.
         dropout  (float): Dropout applied after adding encodings.
-        max_len  (int)  : Maximum sequence length to pre-compute (default 5000).
+        max_len  (int)  : Maximum sequence length supported (default 5000).
     """
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
+
         self.dropout = nn.Dropout(p=dropout)
-        
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0) # Shape: (1, max_len, d_model)
-        
-        self.register_buffer('pe', pe)
+        self.pe = nn.Embedding(max_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -198,11 +269,13 @@ class PositionalEncoding(nn.Module):
 
         Returns:
             Tensor of same shape [batch, seq_len, d_model]
-            = x  +  PE[:, :seq_len, :]  
-
         """
-
-        x = x + self.pe[:, :x.size(1), :] # type: ignore
+        
+        seq_len = x.size(1)
+        positions = torch.arange(0, seq_len, dtype=torch.long, device=x.device)
+        pos_embeddings = self.pe(positions).unsqueeze(0)
+        x = x + pos_embeddings
+        
         return self.dropout(x)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -254,9 +327,9 @@ class EncoderLayer(nn.Module):
         dropout   (float): Dropout probability.
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1, unscaled=False) -> None:
         super().__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout, unscaled=unscaled)
         self.ffn = PositionwiseFeedForward(d_model, d_ff, dropout)
         
         self.norm1 = nn.LayerNorm(d_model)
@@ -293,10 +366,10 @@ class DecoderLayer(nn.Module):
           → [FFN → Add & Norm]
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1, unscaled=False) -> None:
         super().__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
-        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout, unscaled=unscaled)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, unscaled=unscaled)
         self.ffn = PositionwiseFeedForward(d_model, d_ff, dropout)
         
         self.norm1 = nn.LayerNorm(d_model)
@@ -378,6 +451,7 @@ class Transformer(nn.Module):
         num_heads: int   = 8,
         d_ff:      int   = 2048,
         dropout:   float = 0.1,
+        unscaled = False
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -386,10 +460,10 @@ class Transformer(nn.Module):
         self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         
-        enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout)
+        enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
         self.encoder = Encoder(enc_layer, N)
         
-        dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout)
+        dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
         self.decoder = Decoder(dec_layer, N)
         
         self.generator = nn.Linear(d_model, tgt_vocab_size)
