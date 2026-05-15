@@ -23,7 +23,7 @@ from typing import Optional
 from tqdm.auto import tqdm
 import wandb
 from pathlib import Path
-
+import argparse
 # Standard library for BLEU evaluation
 from nltk.translate.bleu_score import corpus_bleu
 
@@ -114,7 +114,6 @@ def run_epoch(
         tgt_input = tgt[:, :-1]
         tgt_labels = tgt[:, 1:].contiguous()
 
-        # Create masks (assuming pad_idx = 1; typically passed from tokenizer)
         pad_idx = loss_fn.pad_idx if hasattr(loss_fn, 'pad_idx') else 1
         src_mask = make_src_mask(src, pad_idx=pad_idx).to(device) # type: ignore
         tgt_mask = make_tgt_mask(tgt_input, pad_idx=pad_idx).to(device) # type: ignore
@@ -161,29 +160,22 @@ def greedy_decode(
     """
     model.eval()
     
-    # 1. Encode source exactly once
     with torch.no_grad():
         memory = model.encode(src, src_mask)
-        
-    # 2. Initialize target tensor with the <sos> token
+    
     ys = torch.ones(1, 1).fill_(start_symbol).type(torch.long).to(device)
     
     for i in range(max_len - 1):
-        # Create mask for the current generated sequence
         tgt_mask = make_tgt_mask(ys, pad_idx=1).to(device)
         
         with torch.no_grad():
             out = model.decode(memory, src_mask, ys, tgt_mask)
             
-        # We only care about the logits for the very last token in the sequence
         prob = out[:, -1, :]
         _, next_word = torch.max(prob, dim=1)
         next_word_idx = next_word.item()
-        
-        # Concatenate the predicted token to the sequence
         ys = torch.cat([ys, torch.ones(1, 1).fill_(next_word_idx).type(torch.long).to(device)], dim=1)
         
-        # Stop early if end of sentence is reached
         if next_word_idx == end_symbol:
             break
             
@@ -205,7 +197,6 @@ def evaluate_bleu(
     """
     model.eval()
     
-    # Get IDs for special tokens
     start_symbol = tgt_vocab.token_to_id("[SOS]")
     end_symbol = tgt_vocab.token_to_id("[EOS]")
     pad_symbol = tgt_vocab.token_to_id("[PAD]")
@@ -216,17 +207,14 @@ def evaluate_bleu(
     for src, tgt in tqdm(test_dataloader, desc="Calculating BLEU"):
         src = src.to(device)
         
-        # Process each sentence in the batch individually for greedy decoding
         for i in range(src.size(0)):
             src_i = src[i:i+1]
             src_mask_i = make_src_mask(src_i, pad_idx=pad_symbol).to(device)
             
-            # 1. Decode Candidate
             pred_tokens = greedy_decode(
                 model, src_i, src_mask_i, max_len, start_symbol, end_symbol, device
             )
             
-            # Remove special tokens from candidate
             pred_indices = pred_tokens.squeeze(0).tolist()
             pred_words = [
                 tgt_vocab.id_to_token(idx) for idx in pred_indices 
@@ -234,16 +222,13 @@ def evaluate_bleu(
             ]
             candidates.append(pred_words)
             
-            # 2. Extract Reference
             target_indices = tgt[i].tolist()
             target_words = [
                 tgt_vocab.id_to_token(idx) for idx in target_indices 
                 if idx not in [start_symbol, end_symbol, pad_symbol]
             ]
-            # NLTK corpus bleu expects list of references per candidate (hence double list)
             references.append([target_words])
 
-    # Compute corpus-level BLEU
     bleu_score = float(corpus_bleu(references, candidates) * 100) # type: ignore
     return bleu_score
 
@@ -260,7 +245,6 @@ def save_checkpoint(
 ) -> None:
     """Save model + optimiser + scheduler state to disk."""
     
-    # Reconstruct the model config based on attributes saved during init
     model_config = {
         'src_vocab_size': model.src_embed.num_embeddings,
         'tgt_vocab_size': model.tgt_embed.num_embeddings,
@@ -351,31 +335,17 @@ def load_data(config, device):
     
     return train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, src_vocab_size, tgt_vocab_size, pad_idx
 
-def run_training_experiment() -> None:
-    config = {
-        "num_epochs": 20,
-        "batch_size": 64,
-        "d_model": 512,
-        "n_layers": 6,
-        "num_heads": 8,
-        "d_ff": 2048,
-        "dropout": 0.1,
-        "smoothing": 0.1,
-        "warmup_steps": 4000,
-        "learning_rate": 3e-4,
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "resume_from": "None"
-    }
-    
+def run_training_experiment(config) -> None:    
     model_name = f"Transformer_noam_labelsmoothing>0_sin_unscaled"
 
-    wandb.init(project="da6401-a3", config=config)
+    wandb.init(project=str(config["wandb"]), config=config)
     device = str(config["device"])
 
     train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, src_vocab_size, tgt_vocab_size, pad_idx = load_data(config, device)
 
-    model = Transformer(src_vocab_size, tgt_vocab_size, int(config["d_model"]), int(config["n_layers"]),
-                        int(config["num_heads"]), d_ff=int(config["d_ff"]), dropout=float(config["dropout"]), unscaled=True).to(device)
+    model = Transformer(int(config["d_model"]), int(config["n_layers"]),
+                        int(config["num_heads"]), d_ff=int(config["d_ff"]), dropout=float(config["dropout"]),
+                        model_path=str(config["model_path"])).to(device)
 
     # model.decoder.output_projection.weight = model.target_embedding.embedding.weight
     optimizer = torch.optim.AdamW(
@@ -440,5 +410,160 @@ def run_training_experiment() -> None:
     
     wandb.finish()
 
+def parse_arguments():
+    """
+    Parse command-line arguments.
+    """
+
+    parser = argparse.ArgumentParser(description='Train a neural network')
+    
+    parser.add_argument(
+        "-e", "--epochs",
+        type=int,
+        default=20,
+        action="store",
+        dest="epochs",
+        help="specify the no of epochs"
+    )
+    
+    parser.add_argument(
+        "-b", "--batch_size",
+        type=int,
+        default=64,
+        action="store",
+        dest="batch_size",
+        help="specify the batch size"
+    )
+
+    parser.add_argument(
+        "-d", "--d_model",
+        type = int,
+        default = 512,
+        action = "store",
+        dest = "d_model",
+        help = "specify the input dimension"
+    )
+
+    parser.add_argument(
+        "-y", "--n_layers",
+        type = int,
+        default = 6,
+        action = "store",
+        dest = "n_layers",
+        help = "specify the no of layers"
+    )
+
+    parser.add_argument(
+        "-a", "--num_heads",
+        type = int,
+        default = 8,
+        action = "store",
+        dest = "num_heads",
+        help = "specify the no of heads"
+    )
+
+    parser.add_argument(
+        "-f", "--d_ff",
+        type = int,
+        default = 2048,
+        action = "store",
+        dest = "d_ff",
+        help = "specify the dimension of ffn"
+    )
+
+    parser.add_argument(
+        "-p", "--dropout",
+        type = float,
+        default = 0.1,
+        action = "store",
+        dest = "dropout",
+        help = "specify the dropout"
+    )
+
+    parser.add_argument(
+        "-s", "--smoothing",
+        type = float,
+        default = 0.1,
+        action = "store",
+        dest = "smoothing",
+        help = "specify the smoothing"
+    )
+
+    parser.add_argument(
+        "-u", "--warmup_steps",
+        type = int,
+        default = 4000,
+        action = "store",
+        dest = "warmup_steps",
+        help = "specify the warmup steps"
+    )
+
+    parser.add_argument(
+        "-l", "--learning_rate",
+        type = int,
+        default = 128,
+        action = "store",
+        dest = "learning_rate",
+        help = "specify the learning rate"
+    )
+
+    parser.add_argument(
+        "-v", "--device",
+        type = str,
+        default = "cuda",
+        action = "store",
+        dest = "device",
+        help = "specify the device"
+    )
+
+    parser.add_argument(
+        "-r", "--resume_from",
+        type = str,
+        action = "store",
+        dest = "resume_from",
+        help = "specify the resume checkpoint"
+    )
+
+    parser.add_argument(
+        "-m", "--model_path",
+        type = str,
+        default = "https://drive.google.com/file/d/1iwWHsn4nRr32OaPIILzLkMtMFPVKolDG/view?usp=sharing",
+        action = "store",
+        dest = "model_path",
+        help = "specify the model path"
+    )
+
+    parser.add_argument(
+        "-w", "--wandb",
+        type = str,
+        default = "da6401-a3",
+        action = "store",
+        dest = "wandb",
+        help = "specify the wandb project"
+    )
+
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    run_training_experiment()
+    args = parse_arguments()
+
+    configs = vars(args)
+
+    run_training_experiment(configs)
+
+# config = {
+    #     "num_epochs": 20,
+    #     "batch_size": 64,
+    #     "d_model": 512,
+    #     "n_layers": 6,
+    #     "num_heads": 8,
+    #     "d_ff": 2048,
+    #     "dropout": 0.1,
+    #     "smoothing": 0.1,
+    #     "warmup_steps": 4000,
+    #     "learning_rate": 3e-4,
+    #     "device": "cuda" if torch.cuda.is_available() else "cpu",
+    #     "resume_from": "None",
+    #     "wandb": "da6401-a3",
+    #     "model_path": "https://drive.google.com/file/d/1MQGn5JmRDy5zxy2ZRnbvvs95ARUZGoqx/view?usp=sharing"
+    # }

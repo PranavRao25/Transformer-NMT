@@ -118,15 +118,11 @@ class Multi30kDataset(Dataset):
         """
         processed = []
         for item in tqdm(self.dataset, desc=f"Processing {self.split} Data"):
-            # 1. Tokenize into strings
             src_tokens = self.tokenize_src(item[self.src_lang]) # type: ignore
             tgt_tokens = self.tokenize_tgt(item[self.tgt_lang]) # type: ignore
-
-            # 2. Convert to indices and append SOS/EOS tokens
             src_indices = [self.SOS_IDX] + [self.src_vocab[token] for token in src_tokens] + [self.EOS_IDX]
             tgt_indices = [self.SOS_IDX] + [self.tgt_vocab[token] for token in tgt_tokens] + [self.EOS_IDX]
 
-            # 3. Store as PyTorch tensors
             processed.append({
                 'src': torch.tensor(src_indices, dtype=torch.long),
                 'tgt': torch.tensor(tgt_indices, dtype=torch.long)

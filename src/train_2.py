@@ -24,8 +24,6 @@ from typing import Optional
 from tqdm.auto import tqdm
 import wandb
 from pathlib import Path
-
-# Standard library for BLEU evaluation
 from nltk.translate.bleu_score import corpus_bleu
 
 from src.model import Transformer, make_src_mask, make_tgt_mask
@@ -55,7 +53,6 @@ class LabelSmoothingLoss(nn.Module):
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1) -> None:
         super().__init__()
         self.pad_idx = pad_idx
-        # PyTorch natively implements the exact math required for this since v1.10
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=pad_idx, 
             label_smoothing=smoothing
@@ -114,7 +111,6 @@ def run_epoch(
         tgt_input = tgt[:, :-1]
         tgt_labels = tgt[:, 1:].contiguous()
 
-        # Create masks (assuming pad_idx = 1; typically passed from tokenizer)
         pad_idx = loss_fn.pad_idx if hasattr(loss_fn, 'pad_idx') else 1
         src_mask = make_src_mask(src, pad_idx=pad_idx).to(device) # type: ignore
         tgt_mask = make_tgt_mask(tgt_input, pad_idx=pad_idx).to(device) # type: ignore
@@ -161,29 +157,22 @@ def greedy_decode(
     """
     model.eval()
     
-    # 1. Encode source exactly once
     with torch.no_grad():
         memory = model.encode(src, src_mask)
         
-    # 2. Initialize target tensor with the <sos> token
     ys = torch.ones(1, 1).fill_(start_symbol).type(torch.long).to(device)
     
     for i in range(max_len - 1):
-        # Create mask for the current generated sequence
         tgt_mask = make_tgt_mask(ys, pad_idx=1).to(device)
         
         with torch.no_grad():
             out = model.decode(memory, src_mask, ys, tgt_mask)
             
-        # We only care about the logits for the very last token in the sequence
         prob = out[:, -1, :]
         _, next_word = torch.max(prob, dim=1)
         next_word_idx = next_word.item()
-        
-        # Concatenate the predicted token to the sequence
         ys = torch.cat([ys, torch.ones(1, 1).fill_(next_word_idx).type(torch.long).to(device)], dim=1)
         
-        # Stop early if end of sentence is reached
         if next_word_idx == end_symbol:
             break
             
@@ -205,7 +194,6 @@ def evaluate_bleu(
     """
     model.eval()
     
-    # Get IDs for special tokens
     start_symbol = tgt_vocab.token_to_id("[SOS]")
     end_symbol = tgt_vocab.token_to_id("[EOS]")
     pad_symbol = tgt_vocab.token_to_id("[PAD]")
@@ -216,17 +204,13 @@ def evaluate_bleu(
     for src, tgt in tqdm(test_dataloader, desc="Calculating BLEU"):
         src = src.to(device)
         
-        # Process each sentence in the batch individually for greedy decoding
         for i in range(src.size(0)):
             src_i = src[i:i+1]
             src_mask_i = make_src_mask(src_i, pad_idx=pad_symbol).to(device)
             
-            # 1. Decode Candidate
             pred_tokens = greedy_decode(
                 model, src_i, src_mask_i, max_len, start_symbol, end_symbol, device
             )
-            
-            # Remove special tokens from candidate
             pred_indices = pred_tokens.squeeze(0).tolist()
             pred_words = [
                 tgt_vocab.id_to_token(idx) for idx in pred_indices 
@@ -234,16 +218,13 @@ def evaluate_bleu(
             ]
             candidates.append(pred_words)
             
-            # 2. Extract Reference
             target_indices = tgt[i].tolist()
             target_words = [
                 tgt_vocab.id_to_token(idx) for idx in target_indices 
                 if idx not in [start_symbol, end_symbol, pad_symbol]
             ]
-            # NLTK corpus bleu expects list of references per candidate (hence double list)
             references.append([target_words])
 
-    # Compute corpus-level BLEU
     bleu_score = float(corpus_bleu(references, candidates) * 100) # type: ignore
     return bleu_score
 
@@ -260,7 +241,6 @@ def save_checkpoint(
 ) -> None:
     """Save model + optimiser + scheduler state to disk."""
     
-    # Reconstruct the model config based on attributes saved during init
     model_config = {
         'src_vocab_size': model.src_embed.num_embeddings,
         'tgt_vocab_size': model.tgt_embed.num_embeddings,
@@ -374,10 +354,9 @@ def run_training_experiment() -> None:
 
     train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, src_vocab_size, tgt_vocab_size, pad_idx = load_data(config, device)
 
-    model = Transformer(src_vocab_size, tgt_vocab_size, int(config["d_model"]), int(config["n_layers"]),
+    model = Transformer(int(config["d_model"]), int(config["n_layers"]),
                         int(config["num_heads"]), d_ff=int(config["d_ff"]), dropout=float(config["dropout"])).to(device)
 
-    # Initialize optimizer with the learning rate from config
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(config["learning_rate"]), betas=(0.9, 0.98), eps=1e-9
     )
@@ -386,7 +365,6 @@ def run_training_experiment() -> None:
     if config["resume_from"] != "None":
         print(f"Resuming training from checkpoint: {config['resume_from']}")
         
-        # Load checkpoint without scheduler
         saved_epoch = load_checkpoint(
             str(parent / "model" / str(config["resume_from"])),
             model, 
@@ -406,7 +384,6 @@ def run_training_experiment() -> None:
     for epoch in range(start_epoch, int(config["num_epochs"])):
         print(f"\n--- Epoch {epoch+1} ---")
         
-        # Pass None for scheduler
         train_loss = run_epoch(
             train_loader, model, loss_fn, optimizer, None, 
             epoch_num=epoch, is_train=True, device=device
@@ -428,7 +405,6 @@ def run_training_experiment() -> None:
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Pass None for scheduler in save_checkpoint
             save_checkpoint(model, optimizer, None, epoch, str(parent / "model" / f"{model_name}.pt"))
 
     print("\nStarting final evaluation...")

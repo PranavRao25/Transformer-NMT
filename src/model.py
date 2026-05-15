@@ -17,7 +17,9 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 import math
 import copy
 from typing import Optional, Tuple
-
+from src.dataset import Multi30kDataset
+import os
+import gdown
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -198,6 +200,8 @@ class MultiHeadAttention(nn.Module):
         else:
             x, attn_w = scaled_dot_product_attention(Q, K, V, mask)
         
+        self.attn_weights = attn_w.detach().cpu()
+
         x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         x = self.dropout(x)
         
@@ -207,60 +211,29 @@ class MultiHeadAttention(nn.Module):
 #   POSITIONAL ENCODING  
 # ══════════════════════════════════════════════════════════════════════
 
-# class PositionalEncoding(nn.Module):
-#     """
-#     Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
-
-#     Args:
-#         d_model  (int)  : Embedding dimensionality.
-#         dropout  (float): Dropout applied after adding encodings.
-#         max_len  (int)  : Maximum sequence length to pre-compute (default 5000).
-#     """
-
-#     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
-#         super().__init__()
-#         self.dropout = nn.Dropout(p=dropout)
-        
-#         pe = torch.zeros(max_len, d_model)
-#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-#         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        
-#         pe[:, 0::2] = torch.sin(position * div_term)
-#         pe[:, 1::2] = torch.cos(position * div_term)
-#         pe = pe.unsqueeze(0) # Shape: (1, max_len, d_model)
-        
-#         self.register_buffer('pe', pe)
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         """
-#         Args:
-#             x : Input embeddings, shape [batch, seq_len, d_model]
-
-#         Returns:
-#             Tensor of same shape [batch, seq_len, d_model]
-#             = x  +  PE[:, :seq_len, :]  
-
-#         """
-
-#         x = x + self.pe[:, :x.size(1), :] # type: ignore
-#         return self.dropout(x)
-
-
 class PositionalEncoding(nn.Module):
     """
-    Learned Positional Encoding using torch.nn.Embedding.
+    Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
 
     Args:
         d_model  (int)  : Embedding dimensionality.
         dropout  (float): Dropout applied after adding encodings.
-        max_len  (int)  : Maximum sequence length supported (default 5000).
+        max_len  (int)  : Maximum sequence length to pre-compute (default 5000).
     """
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
-
         self.dropout = nn.Dropout(p=dropout)
-        self.pe = nn.Embedding(max_len, d_model)
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0) # Shape: (1, max_len, d_model)
+        
+        self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -269,14 +242,44 @@ class PositionalEncoding(nn.Module):
 
         Returns:
             Tensor of same shape [batch, seq_len, d_model]
+            = x  +  PE[:, :seq_len, :]  
+
         """
-        
-        seq_len = x.size(1)
-        positions = torch.arange(0, seq_len, dtype=torch.long, device=x.device)
-        pos_embeddings = self.pe(positions).unsqueeze(0)
-        x = x + pos_embeddings
-        
+
+        x = x + self.pe[:, :x.size(1), :] # type: ignore
         return self.dropout(x)
+
+# class PositionalEncoding(nn.Module):
+#     """
+#     Learned Positional Encoding using torch.nn.Embedding.
+
+#     Args:
+#         d_model  (int)  : Embedding dimensionality.
+#         dropout  (float): Dropout applied after adding encodings.
+#         max_len  (int)  : Maximum sequence length supported (default 5000).
+#     """
+
+#     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+#         super().__init__()
+
+#         self.dropout = nn.Dropout(p=dropout)
+#         self.pe = nn.Embedding(max_len, d_model)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             x : Input embeddings, shape [batch, seq_len, d_model]
+
+#         Returns:
+#             Tensor of same shape [batch, seq_len, d_model]
+#         """
+        
+#         seq_len = x.size(1)
+#         positions = torch.arange(0, seq_len, dtype=torch.long, device=x.device)
+#         pos_embeddings = self.pe(positions).unsqueeze(0)
+#         x = x + pos_embeddings
+        
+#         return self.dropout(x)
 
 # ══════════════════════════════════════════════════════════════════════
 #  FEED-FORWARD NETWORK 
@@ -444,30 +447,44 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
         d_model:   int   = 512,
         N:         int   = 6,
         num_heads: int   = 8,
         d_ff:      int   = 2048,
         dropout:   float = 0.1,
-        unscaled = False
+        unscaled = False,
+        model_path = None
     ) -> None:
+
         super().__init__()
         self.d_model = d_model
-        
-        self.src_embed = nn.Embedding(src_vocab_size, d_model)
-        self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
-        
-        enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
-        self.encoder = Encoder(enc_layer, N)
-        
-        dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
-        self.decoder = Decoder(dec_layer, N)
-        
-        self.generator = nn.Linear(d_model, tgt_vocab_size)
 
+        self.dataset = Multi30kDataset(split='train')
+        self.src_vocab_size = len(self.dataset.src_vocab)
+        self.tgt_vocab_size = len(self.dataset.tgt_vocab)
+
+        self.src_embed   = nn.Embedding(self.src_vocab_size, d_model)
+        self.tgt_embed   = nn.Embedding(self.tgt_vocab_size, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+
+        enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
+        self.encoder = Encoder(enc_layer, N)
+
+        dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout, unscaled=unscaled)
+        self.decoder = Decoder(dec_layer, N)
+
+        self.generator = nn.Linear(d_model, self.tgt_vocab_size)
+
+        if model_path is not None:
+            weights_path = "transformer_weights.pt"
+            if not os.path.exists(weights_path):
+                gdown.download( # type: ignore
+                    model_path,
+                    weights_path,
+                    quiet=False
+                )
+            checkpoint = torch.load(weights_path, map_location="cpu")
+            self.load_state_dict(checkpoint["model_state_dict"])
     # ── AUTOGRADER HOOKS ── keep these signatures exactly ─────────────
 
     def encode(
@@ -502,3 +519,82 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         logits = self.decode(memory, src_mask, tgt, tgt_mask)
         return logits
+
+    def infer(self, src_sentence: str) -> str:
+        """
+        Translates a German sentence to English using greedy autoregressive decoding.
+        
+        Args:
+            src_sentence: The raw German text.
+            
+            
+        Returns:
+            The fully translated English string, detokenized and clean.
+        """
+
+        device = next(self.parameters()).device
+
+        src_tokens = self.dataset.tokenize_src(src_sentence)
+        src_indices = (
+            [self.dataset.SOS_IDX]
+            + [self.dataset.src_vocab[tok] for tok in src_tokens]
+            + [self.dataset.EOS_IDX]
+        )
+        src_tensor = torch.tensor(src_indices, dtype=torch.long).unsqueeze(0).to(device)
+
+        src_mask = make_src_mask(src_tensor, pad_idx=self.dataset.PAD_IDX).to(device)
+
+        start_symbol = self.dataset.tgt_vocab.token_to_id("[SOS]")
+        end_symbol   = self.dataset.tgt_vocab.token_to_id("[EOS]")
+        pad_symbol   = self.dataset.tgt_vocab.token_to_id("[PAD]")
+
+        output_tokens = self.greedy_decode(
+            src_tensor,
+            src_mask,
+            max_len=100,
+            start_symbol= start_symbol, # type: ignore
+            end_symbol= end_symbol, # type: ignore
+            device=str(device)
+        )
+
+        token_ids = output_tokens.squeeze(0).tolist()
+        special = {start_symbol, end_symbol, pad_symbol}
+        words = [
+            self.dataset.tgt_vocab.id_to_token(idx)
+            for idx in token_ids
+            if idx not in special
+        ]
+
+        return " ".join(words)
+    
+    def greedy_decode(
+        self,
+        src: torch.Tensor,
+        src_mask: torch.Tensor,
+        max_len: int,
+        start_symbol: int,
+        end_symbol: int,
+        device: str = "cpu",
+    ) -> torch.Tensor:
+        """
+        Generate a translation token-by-token using greedy decoding.
+        """
+        
+        with torch.no_grad():
+            memory = self.encode(src, src_mask)
+        
+        ys = torch.ones(1, 1).fill_(start_symbol).type(torch.long).to(device)
+        
+        for i in range(max_len - 1):
+            tgt_mask = make_tgt_mask(ys, pad_idx=1).to(device)
+            with torch.no_grad():
+                out = self.decode(memory, src_mask, ys, tgt_mask)
+                
+            prob = out[:, -1, :]
+            _, next_word = torch.max(prob, dim=1)
+            next_word_idx = next_word.item()
+            ys = torch.cat([ys, torch.ones(1, 1).fill_(next_word_idx).type(torch.long).to(device)], dim=1)
+            if next_word_idx == end_symbol:
+                break
+                
+        return ys
